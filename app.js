@@ -7,22 +7,26 @@
 'use strict';
 
 const YT_API_KEY = 'AIzaSyDgLq9sKuA6MbFIumNqTXnpIwXwNob--hU';
-const MAX_RESULTS = 20; // videos to fetch per channel
+const MAX_RESULTS = 50; // fetch more so we have room to skip blocked ones
 
 /* ── Default Channels ── */
+// Note: channels that disallow embedding are auto-skipped at runtime
 const DEFAULT_CHANNELS = [
-  { id: 1,  name: 'ViuTV',          chId: 'UCjmJDjuh8xALJSH6MsFgBig', emoji: '📺', category: '港台' },
-  { id: 2,  name: '香港電台 RTHK',  chId: 'UCov2zYcNKnFGnMRzlbLpC-g', emoji: '📻', category: '港台' },
-  { id: 3,  name: '壹傳媒 Next TV',  chId: 'UCX2pYbcjzVkVNT9VGqKc0Aw', emoji: '📡', category: '港台' },
-  { id: 4,  name: 'Now 新聞',        chId: 'UCY5N3kEbJ7MuPswSW7IVGHA', emoji: '📰', category: '新聞' },
-  { id: 5,  name: 'CNN',             chId: 'UCupvZG-5ko_eiXAupbDfxWw', emoji: '🌐', category: '新聞' },
-  { id: 6,  name: 'BBC News',        chId: 'UC16niRr50-MSBwiO3YDb3RA', emoji: '🇬🇧', category: '新聞' },
-  { id: 7,  name: 'NHK World',       chId: 'UC6a76FHiRNEfHrEAqL8Gfzg', emoji: '🇯🇵', category: '新聞' },
-  { id: 8,  name: 'NASA',            chId: 'UCLA_DiR1FfKNvjuUpBHmylQ', emoji: '🚀', category: '知識' },
-  { id: 9,  name: 'TED',             chId: 'UCAuUUnT6oDeKwE6v1NGQxug', emoji: '💡', category: '知識' },
-  { id: 10, name: 'National Geog.',  chId: 'UCpVm7bg6pXKo1Pr6k5kxG9A', emoji: '🌍', category: '知識' },
+  // 新聞 (embed-friendly)
+  { id: 1,  name: 'Al Jazeera',      chId: 'UCNye-wNBqNL5ZzHSJdpkiRg', emoji: '🌐', category: '新聞' },
+  { id: 2,  name: 'DW News',         chId: 'UCknLrEdhRCp1aegoMqRaCZg', emoji: '🇩🇪', category: '新聞' },
+  { id: 3,  name: 'France 24',       chId: 'UCQfwfsi5VrQ8yKZ-UWmAoBg', emoji: '🇫🇷', category: '新聞' },
+  { id: 4,  name: 'Bloomberg',       chId: 'UCIALMKvObZNtJ6AmdCLP7Lg', emoji: '📈', category: '新聞' },
+  { id: 5,  name: 'NHK World',       chId: 'UC6a76FHiRNEfHrEAqL8Gfzg', emoji: '🇯🇵', category: '新聞' },
+  // 知識
+  { id: 6,  name: 'NASA',            chId: 'UCLA_DiR1FfKNvjuUpBHmylQ', emoji: '🚀', category: '知識' },
+  { id: 7,  name: 'TED',             chId: 'UCAuUUnT6oDeKwE6v1NGQxug', emoji: '💡', category: '知識' },
+  { id: 8,  name: 'Veritasium',      chId: 'UCHnyfMqiRRG1u-2MsSQLbXA', emoji: '🔬', category: '知識' },
+  { id: 9,  name: 'Kurzgesagt',      chId: 'UCsXVk37bltHxD1rDPwtNM8Q', emoji: '🐦', category: '知識' },
+  { id: 10, name: 'Nat. Geographic', chId: 'UCpVm7bg6pXKo1Pr6k5kxG9A', emoji: '🌍', category: '知識' },
+  // 音樂
   { id: 11, name: 'Lofi Girl',       chId: 'UCSJ4gkVC6NrvII8umztf0Ow', emoji: '🎵', category: '音樂' },
-  { id: 12, name: 'Vevo',            chId: 'UCg9_QB3IQWB5ZF-RTKF55UQ', emoji: '🎬', category: '音樂' },
+  { id: 12, name: 'Trap Nation',     chId: 'UCa10nxShhzNrCE1o2ZOPztg', emoji: '🎧', category: '音樂' },
 ];
 
 /* ── State ── */
@@ -31,6 +35,8 @@ const state = {
   currentChIdx: 0,
   currentVidIdx: 0,
   videoCache: {},       // chId -> [{ videoId, title }]
+  blockedVideos: new Set(), // videoIds blocked from embed
+  skipCount: 0,             // consecutive skip counter
   player: null,
   playerReady: false,
   isPlaying: false,
@@ -198,6 +204,7 @@ function onPlayerStateChange(e) {
   const S = YT.PlayerState;
   if (e.data === S.PLAYING) {
     state.isPlaying = true;
+    state.skipCount = 0;
     updatePlayBtn();
     try {
       const d = state.player.getVideoData();
@@ -213,9 +220,27 @@ function onPlayerStateChange(e) {
   }
 }
 
-function onPlayerError() {
-  // skip broken video
-  setTimeout(() => nextVideo(), 800);
+function onPlayerError(e) {
+  // YT error codes: 2=bad param, 5=html5 error, 100=not found, 101/150=embed not allowed
+  const embedBlocked = e.data === 101 || e.data === 150;
+  const ch = state.channels[state.currentChIdx];
+  const videos = state.videoCache[ch?.chId] || [];
+  const vid = videos[state.currentVidIdx];
+
+  if (embedBlocked && vid) {
+    state.blockedVideos.add(vid.videoId);
+    console.log('Embed blocked, skipping:', vid.videoId);
+  }
+
+  state.skipCount++;
+  if (state.skipCount >= 10) {
+    // whole channel seems blocked — move to next channel
+    state.skipCount = 0;
+    showToast('此頻道不支援播放，自動跳台...');
+    setTimeout(() => nextChannel(), 1200);
+    return;
+  }
+  setTimeout(() => nextVideo(), 600);
 }
 
 function updatePlayBtn() {
@@ -258,9 +283,15 @@ async function loadChannel(idx, vidIdx) {
 
 function playVideoId(videoId, title, ch) {
   if (!state.playerReady || !state.player) return;
+  // skip known-blocked videos
+  if (state.blockedVideos.has(videoId)) {
+    setTimeout(() => nextVideo(), 100);
+    return;
+  }
   try {
     state.player.loadVideoById({ videoId, suggestedQuality: 'hd720' });
     state.isPlaying = true;
+    state.skipCount = 0; // reset on successful load attempt
     updatePlayBtn();
     if (title) updateHud(ch || state.channels[state.currentChIdx], title);
   } catch(e) {
